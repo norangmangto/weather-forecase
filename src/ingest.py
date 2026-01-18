@@ -4,7 +4,7 @@ import pandas as pd
 import duckdb
 import io
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
 class WeatherIngestor:
     def __init__(self, db_path="data/weather.db"):
@@ -112,7 +112,8 @@ class WeatherIngestor:
         # Historical air quality API
         start_date = "2020-01-01"
         end_date = datetime.now().strftime("%Y-%m-%d")
-        url = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&hourly=pm10,pm2_5&start_date={start_date}&end_date={end_date}&format=json"
+        pollutants = "pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone"
+        url = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&hourly={pollutants}&start_date={start_date}&end_date={end_date}&format=json"
 
         r = requests.get(url)
         data = r.json()
@@ -125,14 +126,52 @@ class WeatherIngestor:
         df['time'] = pd.to_datetime(df['time'])
 
         # Aggregate to daily (mean)
-        df_daily = df.groupby(df['time'].dt.date).agg({
-            'pm10': 'mean',
-            'pm2_5': 'mean'
-        }).reset_index()
-        df_daily.columns = ['date', 'pm10_mean', 'pm2_5_mean']
+        agg_map = {p: 'mean' for p in pollutants.split(',')}
+        df_daily = df.groupby(df['time'].dt.date).agg(agg_map).reset_index()
+        df_daily.rename(columns={'time': 'date'}, inplace=True)
+        # Rename columns to match conventions
+        df_daily.columns = ['date'] + [f"{p}_mean" for p in pollutants.split(',')]
 
         self.conn.execute("CREATE OR REPLACE TABLE raw_openmeteo_aq AS SELECT * FROM df_daily")
         print(f"Ingested {len(df_daily)} rows into raw_openmeteo_aq")
+
+    def ingest_openmeteo_supplemental(self, lat=51.2217, lon=6.7762):
+        """
+        Ingests supplemental weather data (UV Index, Visibility) from Open-Meteo Historical API.
+        """
+        print("Fetching Open-Meteo supplemental weather data...")
+        start_date = "2020-01-01"
+        # Archive API usually lags by 1 day
+        end_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={start_date}&end_date={end_date}&hourly=uv_index,visibility&format=json"
+
+        try:
+            r = requests.get(url)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            print(f"Failed to fetch supplemental data: {e}")
+            # Ensure table exists even if empty
+            self.conn.execute("CREATE TABLE IF NOT EXISTS raw_openmeteo_supplement (date DATE, uv_index_max DOUBLE, visibility_mean DOUBLE)")
+            return
+
+        if "hourly" not in data:
+            print("No hourly data found in Open-Meteo supplemental response")
+            self.conn.execute("CREATE TABLE IF NOT EXISTS raw_openmeteo_supplement (date DATE, uv_index_max DOUBLE, visibility_mean DOUBLE)")
+            return
+
+        df = pd.DataFrame(data["hourly"])
+        df['time'] = pd.to_datetime(df['time'])
+
+        # Aggregate to daily (mean)
+        df_daily = df.groupby(df['time'].dt.date).agg({
+            'uv_index': 'max', # Max UV index of the day is usually more relevant
+            'visibility': 'mean'
+        }).reset_index()
+        df_daily.columns = ['date', 'uv_index_max', 'visibility_mean']
+
+        self.conn.execute("CREATE OR REPLACE TABLE raw_openmeteo_supplement AS SELECT * FROM df_daily")
+        print(f"Ingested {len(df_daily)} rows into raw_openmeteo_supplement")
 
     def close(self):
         self.conn.close()
@@ -142,4 +181,5 @@ if __name__ == "__main__":
     ingestor.ingest_dwd_historical()
     ingestor.ingest_dwd_recent()
     ingestor.ingest_openmeteo_air_quality()
+    ingestor.ingest_openmeteo_supplemental()
     ingestor.close()

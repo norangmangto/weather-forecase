@@ -33,11 +33,16 @@ class WeatherModelTrainer:
         feature_cols = [
             'day_of_year', 'day_sin', 'day_cos', 'month', 'year',
             'temp_mean_lag1', 'temp_mean_lag7',
-            'temp_max_lag1', 'temp_min_lag1',
-            'wind_speed_lag1', 'precipitation_lag1', 'humidity_lag1',
+            'temp_max_lag1', 'temp_min_lag1', 'temp_ground_min_lag1',
+            'wind_speed_lag1', 'wind_gust_lag1', 'precipitation_lag1',
+            'humidity_lag1', 'pressure_lag1', 'snow_depth_lag1', 'uv_index_lag1',
             'temp_mean_7d_avg', 'temp_max_7d_avg', 'temp_min_7d_avg',
-            'wind_speed_7d_avg', 'precipitation_7d_avg', 'humidity_7d_avg',
-            'pm10_mean', 'pm2_5_mean', 'cloud_cover_mean', 'sunshine_hours'
+            'wind_speed_7d_avg', 'wind_gust_7d_avg', 'precipitation_7d_avg',
+            'humidity_7d_avg', 'pressure_7d_avg',
+            'pm10_mean', 'pm2_5_mean', 'carbon_monoxide_mean', 'nitrogen_dioxide_mean',
+            'sulphur_dioxide_mean', 'ozone_mean',
+            'uv_index_max', 'visibility_mean',
+            'cloud_cover_mean', 'sunshine_hours'
         ]
 
         # Filter only the columns that exist
@@ -49,8 +54,8 @@ class WeatherModelTrainer:
 
         return X, y
 
-    def load_latest_model(self, model_type, target_name):
-        """Load the most recent model if it exists."""
+    def load_latest_model(self, model_type, target_name, current_features=None):
+        """Load the most recent model if it exists and matches features."""
         from glob import glob
 
         # Pattern: modeltype_targetname_timestamp.pkl
@@ -62,8 +67,22 @@ class WeatherModelTrainer:
 
         # Sort by timestamp (files[-1] is latest)
         latest_file = sorted(files)[-1]
+        model = joblib.load(latest_file)
+
+        # Validate features if current_features is provided
+        if current_features is not None:
+            model_features = []
+            if hasattr(model, 'feature_names_in_'):
+                model_features = list(model.feature_names_in_)
+            elif hasattr(model, 'feature_names'):
+                model_features = model.feature_names # XGBoost
+
+            if model_features and list(model_features) != list(current_features):
+                print(f"Feature mismatch for {latest_file}. Returning None for fresh training.")
+                return None
+
         print(f"Loading existing {model_type} model for {target_name} from {latest_file}")
-        return joblib.load(latest_file)
+        return model
 
     def train_regressors(self, X, y, target_name):
         """Train XGBoost and Random Forest regression models."""
@@ -76,7 +95,7 @@ class WeatherModelTrainer:
 
         # XGBoost
         print(f"\nTraining XGBoost Regressor for {target_name}...")
-        existing_xgb = self.load_latest_model('xgboost', target_name)
+        existing_xgb = self.load_latest_model('xgboost', target_name, current_features=X_train.columns)
 
         xgb_model = XGBRegressor(
             n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42, verbosity=0
@@ -99,7 +118,7 @@ class WeatherModelTrainer:
 
         # Random Forest
         print(f"Training Random Forest Regressor for {target_name}...")
-        existing_rf = self.load_latest_model('random_forest', target_name)
+        existing_rf = self.load_latest_model('random_forest', target_name, current_features=X_train.columns)
 
         if existing_rf:
             # Warm start requires increasing n_estimators
@@ -133,7 +152,7 @@ class WeatherModelTrainer:
 
         # XGBoost Classifier
         print(f"\nTraining XGBoost Classifier for {target_name}...")
-        existing_xgb = self.load_latest_model('xgboost', target_name)
+        existing_xgb = self.load_latest_model('xgboost', target_name, current_features=X_train.columns)
 
         xgb_model = XGBClassifier(
             n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42, verbosity=0,
@@ -156,7 +175,7 @@ class WeatherModelTrainer:
 
         # Random Forest Classifier
         print(f"Training Random Forest Classifier for {target_name}...")
-        existing_rf = self.load_latest_model('random_forest', target_name)
+        existing_rf = self.load_latest_model('random_forest', target_name, current_features=X_train.columns)
 
         if existing_rf:
             rf_model = existing_rf
@@ -186,6 +205,31 @@ class WeatherModelTrainer:
             joblib.dump(model, model_path)
             print(f"Saved {model_name} to {model_path}")
 
+    def cleanup_old_models(self, keep_n=3):
+        """Keep only the N most recent models for each target/type."""
+        from glob import glob
+
+        targets = [
+            'temp_max', 'temp_min', 'temp_mean', 'wind_speed_mean',
+            'precipitation_mm', 'humidity_mean', 'rain_probability'
+        ]
+        model_types = ['xgboost', 'random_forest']
+
+        print("\nCleaning up old model checkpoints...")
+        for model_type in model_types:
+            for target in targets:
+                pattern = os.path.join(self.models_dir, f"{model_type}_{target}_*.pkl")
+                files = sorted(glob(pattern))
+
+                if len(files) > keep_n:
+                    to_delete = files[:-keep_n]
+                    print(f"  Removing {len(to_delete)} old versions of {model_type}_{target}")
+                    for f in to_delete:
+                        try:
+                            os.remove(f)
+                        except Exception as e:
+                            print(f"  Error deleting {f}: {e}")
+
     def run(self):
         """Main training pipeline."""
         print("Loading features from DuckDB...")
@@ -195,10 +239,16 @@ class WeatherModelTrainer:
         regression_targets = {
             'temp_max': ['temp_max'],
             'temp_min': ['temp_min'],
-            'temp_mean': ['temp_mean'],      # Processed as regression
+            'temp_mean': ['temp_mean'],
+            'temp_ground_min': ['temp_ground_min'],
             'wind_speed_mean': ['wind_speed_mean'],
+            'wind_gust_max': ['wind_gust_max'],
             'precipitation_mm': ['precipitation_mm'],
-            'humidity_mean': ['humidity_mean'] # Processed as regression
+            'humidity_mean': ['humidity_mean'],
+            'pressure_hpa': ['pressure_hpa'],
+            'snow_depth_cm': ['snow_depth_cm'],
+            'uv_index_max': ['uv_index_max'],
+            'visibility_mean': ['visibility_mean']
         }
 
         all_results = {}
@@ -240,6 +290,9 @@ class WeatherModelTrainer:
         print(f"\nrain_probability Results:")
         for model_name, metrics in results.items():
             print(f"  {model_name}: Accuracy={metrics['accuracy']:.4f}, AUC={metrics['roc_auc']:.4f}")
+
+        # Cleanup old models
+        self.cleanup_old_models(keep_n=3)
 
         print(f"\n{'='*60}")
         print("Training completed!")

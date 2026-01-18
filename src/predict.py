@@ -5,12 +5,14 @@ import joblib
 import os
 from glob import glob
 from datetime import datetime, timedelta
+from src.monitor import WeatherMonitor
 
 class WeatherPredictor:
     def __init__(self, db_path="data/weather.db", models_dir="models"):
         self.db_path = db_path
         self.models_dir = models_dir
         self.models = {}
+        self.monitor = WeatherMonitor(db_path)
 
     def load_latest_models(self):
         """Load the most recent model for each target."""
@@ -115,17 +117,30 @@ class WeatherPredictor:
             'temp_mean_lag7': latest_row['temp_mean_lag7'].iloc[0],
             'temp_max_lag1': latest_row['temp_max'].iloc[0],
             'temp_min_lag1': latest_row['temp_min'].iloc[0],
+            'temp_ground_min_lag1': latest_row['temp_ground_min'].iloc[0] if 'temp_ground_min' in latest_row else 0,
             'wind_speed_lag1': latest_row['wind_speed_mean'].iloc[0],
+            'wind_gust_lag1': latest_row['wind_gust_max'].iloc[0] if 'wind_gust_max' in latest_row else 0,
             'precipitation_lag1': latest_row['precipitation_mm'].iloc[0],
-            'humidity_lag1': latest_row['humidity_mean'].iloc[0] if 'humidity_mean' in latest_row else 0, # Handle potentially missing column if not re-run
+            'humidity_lag1': latest_row['humidity_mean'].iloc[0],
+            'pressure_lag1': latest_row['pressure_hpa'].iloc[0] if 'pressure_hpa' in latest_row else 0,
+            'snow_depth_lag1': latest_row['snow_depth_cm'].iloc[0] if 'snow_depth_cm' in latest_row else 0,
+            'uv_index_lag1': latest_row['uv_index_max'].iloc[0] if 'uv_index_max' in latest_row else 0,
             'temp_mean_7d_avg': latest_row['temp_mean_7d_avg'].iloc[0],
             'temp_max_7d_avg': latest_row['temp_max_7d_avg'].iloc[0],
             'temp_min_7d_avg': latest_row['temp_min_7d_avg'].iloc[0],
             'wind_speed_7d_avg': latest_row['wind_speed_7d_avg'].iloc[0],
+            'wind_gust_7d_avg': latest_row['wind_gust_7d_avg'].iloc[0] if 'wind_gust_7d_avg' in latest_row else 0,
             'precipitation_7d_avg': latest_row['precipitation_7d_avg'].iloc[0],
-            'humidity_7d_avg': latest_row['humidity_7d_avg'].iloc[0] if 'humidity_7d_avg' in latest_row else 0,
+            'humidity_7d_avg': latest_row['humidity_7d_avg'].iloc[0],
+            'pressure_7d_avg': latest_row['pressure_7d_avg'].iloc[0] if 'pressure_7d_avg' in latest_row else 0,
             'pm10_mean': latest_row['pm10_mean'].iloc[0],
             'pm2_5_mean': latest_row['pm2_5_mean'].iloc[0],
+            'carbon_monoxide_mean': latest_row['carbon_monoxide_mean'].iloc[0] if 'carbon_monoxide_mean' in latest_row else 0,
+            'nitrogen_dioxide_mean': latest_row['nitrogen_dioxide_mean'].iloc[0] if 'nitrogen_dioxide_mean' in latest_row else 0,
+            'sulphur_dioxide_mean': latest_row['sulphur_dioxide_mean'].iloc[0] if 'sulphur_dioxide_mean' in latest_row else 0,
+            'ozone_mean': latest_row['ozone_mean'].iloc[0] if 'ozone_mean' in latest_row else 0,
+            'uv_index_max': latest_row['uv_index_max'].iloc[0] if 'uv_index_max' in latest_row else 0,
+            'visibility_mean': latest_row['visibility_mean'].iloc[0] if 'visibility_mean' in latest_row else 0,
             'cloud_cover_mean': latest_row['cloud_cover_mean'].iloc[0],
             'sunshine_hours': latest_row['sunshine_hours'].iloc[0]
         }
@@ -156,7 +171,12 @@ class WeatherPredictor:
             predictions = {'date': forecast_date.strftime('%Y-%m-%d')}
 
             # Predict each target
-            targets = ['temp_max', 'temp_min', 'temp_mean', 'wind_speed_mean', 'precipitation_mm', 'humidity_mean', 'rain_probability']
+            targets = [
+                'temp_max', 'temp_min', 'temp_mean', 'temp_ground_min',
+                'wind_speed_mean', 'wind_gust_max', 'precipitation_mm',
+                'humidity_mean', 'pressure_hpa', 'snow_depth_cm',
+                'uv_index_max', 'visibility_mean', 'rain_probability'
+            ]
             for target in targets:
                 model_key = f"{model_type}_{target}"
                 if model_key in self.models:
@@ -208,6 +228,10 @@ class WeatherPredictor:
         date_suffix = f"_{start_date}" if start_date else ""
         xgb_forecast.to_csv(f"forecasts_xgboost{date_suffix}_{timestamp}.csv", index=False)
         rf_forecast.to_csv(f"forecasts_rf{date_suffix}_{timestamp}.csv", index=False)
+
+        # Log to MLOps Monitor
+        self.monitor.save_forecast(xgb_forecast, 'xgboost')
+        self.monitor.save_forecast(rf_forecast, 'random_forest')
 
         print(f"\nForecasts saved to:")
         print(f"  - forecasts_xgboost{date_suffix}_{timestamp}.csv")
