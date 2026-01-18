@@ -1,0 +1,16 @@
+name: 'weather_dbt'
+version: '1.0.0'
+
+profile: 'weather_dbt'
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+
+models:
+  weather_dbt:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table

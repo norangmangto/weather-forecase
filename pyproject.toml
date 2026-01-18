@@ -1,0 +1,15 @@
+[project]
+name = "weather-prediction"
+version = "0.5.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "beautifulsoup4>=4.14.3",
+    "dbt-duckdb>=1.10.0",
+    "pandas>=2.3.3",
+    "polars>=1.37.1",
+    "requests>=2.32.5",
+    "scikit-learn>=1.8.0",
+    "xgboost>=3.1.3",
+]

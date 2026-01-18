@@ -1,0 +1,7 @@
+weather_dbt:
+  outputs:
+    dev:
+      type: duckdb
+      path: ../data/weather.db
+      threads: 4
+  target: dev
