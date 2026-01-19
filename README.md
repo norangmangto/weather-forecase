@@ -37,7 +37,7 @@ We chose a modern, efficient stack to keep the project lightweight yet powerful.
 ## 📂 Project Structure Explained
 
 ```
-weather_prediction/
+weather-forecast/
 ├── data/
 │   └── weather.db              # The DuckDB database file (created after running ingestion)
 ├── dbt/                        # dbt project folder

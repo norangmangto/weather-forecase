@@ -54,12 +54,12 @@ class WeatherModelTrainer:
 
         return X, y
 
-    def load_latest_model(self, model_type, target_name, current_features=None):
+    def load_latest_model(self, model_type, target_name, station_id, current_features=None):
         """Load the most recent model if it exists and matches features."""
         from glob import glob
 
-        # Pattern: modeltype_targetname_timestamp.pkl
-        pattern = os.path.join(self.models_dir, f"{model_type}_{target_name}_*.pkl")
+        # Pattern: modeltype_targetname_stationid_timestamp.pkl
+        pattern = os.path.join(self.models_dir, f"{model_type}_{target_name}_{station_id}_*.pkl")
         files = glob(pattern)
 
         if not files:
@@ -81,10 +81,10 @@ class WeatherModelTrainer:
                 print(f"Feature mismatch for {latest_file}. Returning None for fresh training.")
                 return None
 
-        print(f"Loading existing {model_type} model for {target_name} from {latest_file}")
+        print(f"Loading existing {model_type} model for {target_name} ({station_id}) from {latest_file}")
         return model
 
-    def train_regressors(self, X, y, target_name):
+    def train_regressors(self, X, y, target_name, station_id):
         """Train XGBoost and Random Forest regression models."""
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, shuffle=False
@@ -94,8 +94,8 @@ class WeatherModelTrainer:
         results = {}
 
         # XGBoost
-        print(f"\nTraining XGBoost Regressor for {target_name}...")
-        existing_xgb = self.load_latest_model('xgboost', target_name, current_features=X_train.columns)
+        print(f"\nTraining XGBoost Regressor for {target_name} (Station: {station_id})...")
+        existing_xgb = self.load_latest_model('xgboost', target_name, station_id, current_features=X_train.columns)
 
         xgb_model = XGBRegressor(
             n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42, verbosity=0
@@ -117,8 +117,8 @@ class WeatherModelTrainer:
         }
 
         # Random Forest
-        print(f"Training Random Forest Regressor for {target_name}...")
-        existing_rf = self.load_latest_model('random_forest', target_name, current_features=X_train.columns)
+        print(f"Training Random Forest Regressor for {target_name} (Station: {station_id})...")
+        existing_rf = self.load_latest_model('random_forest', target_name, station_id, current_features=X_train.columns)
 
         if existing_rf:
             # Warm start requires increasing n_estimators
@@ -141,7 +141,7 @@ class WeatherModelTrainer:
         }
         return models, results
 
-    def train_classifiers(self, X, y, target_name):
+    def train_classifiers(self, X, y, target_name, station_id):
         """Train XGBoost and Random Forest classification models."""
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, shuffle=False
@@ -151,8 +151,8 @@ class WeatherModelTrainer:
         results = {}
 
         # XGBoost Classifier
-        print(f"\nTraining XGBoost Classifier for {target_name}...")
-        existing_xgb = self.load_latest_model('xgboost', target_name, current_features=X_train.columns)
+        print(f"\nTraining XGBoost Classifier for {target_name} (Station: {station_id})...")
+        existing_xgb = self.load_latest_model('xgboost', target_name, station_id, current_features=X_train.columns)
 
         xgb_model = XGBClassifier(
             n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42, verbosity=0,
@@ -174,8 +174,8 @@ class WeatherModelTrainer:
         }
 
         # Random Forest Classifier
-        print(f"Training Random Forest Classifier for {target_name}...")
-        existing_rf = self.load_latest_model('random_forest', target_name, current_features=X_train.columns)
+        print(f"Training Random Forest Classifier for {target_name} (Station: {station_id})...")
+        existing_rf = self.load_latest_model('random_forest', target_name, station_id, current_features=X_train.columns)
 
         if existing_rf:
             rf_model = existing_rf
@@ -197,45 +197,52 @@ class WeatherModelTrainer:
         }
         return models, results
 
-    def save_models(self, models, target_name):
+    def save_models(self, models, target_name, station_id):
         """Save trained models to disk."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         for model_name, model in models.items():
-            model_path = os.path.join(self.models_dir, f"{model_name}_{target_name}_{timestamp}.pkl")
+            model_path = os.path.join(self.models_dir, f"{model_name}_{target_name}_{station_id}_{timestamp}.pkl")
             joblib.dump(model, model_path)
             print(f"Saved {model_name} to {model_path}")
 
     def cleanup_old_models(self, keep_n=3):
-        """Keep only the N most recent models for each target/type."""
+        """Keep only the N most recent models for each target/type/station."""
         from glob import glob
+        from collections import defaultdict
 
-        targets = [
-            'temp_max', 'temp_min', 'temp_mean', 'wind_speed_mean',
-            'precipitation_mm', 'humidity_mean', 'rain_probability'
-        ]
-        model_types = ['xgboost', 'random_forest']
+        all_model_files = glob(os.path.join(self.models_dir, "*.pkl"))
+
+        # Group by type, target, and station
+        groups = defaultdict(list)
+        for f in all_model_files:
+            basename = os.path.basename(f)
+            parts = basename.replace('.pkl', '').split('_')
+            # Extract prefix (type+target+station) and timestamp
+            # We need to be careful with the varying lengths of target names
+            # But we know timestamp is the last two parts: YYYYMMDD and HHMMSS
+            prefix = "_".join(parts[:-2])
+            groups[prefix].append(f)
 
         print("\nCleaning up old model checkpoints...")
-        for model_type in model_types:
-            for target in targets:
-                pattern = os.path.join(self.models_dir, f"{model_type}_{target}_*.pkl")
-                files = sorted(glob(pattern))
-
-                if len(files) > keep_n:
-                    to_delete = files[:-keep_n]
-                    print(f"  Removing {len(to_delete)} old versions of {model_type}_{target}")
-                    for f in to_delete:
-                        try:
-                            os.remove(f)
-                        except Exception as e:
-                            print(f"  Error deleting {f}: {e}")
+        for prefix, files in groups.items():
+            files = sorted(files)
+            if len(files) > keep_n:
+                to_delete = files[:-keep_n]
+                print(f"  Removing {len(to_delete)} old versions of {prefix}")
+                for f in to_delete:
+                    try:
+                        os.remove(f)
+                    except Exception as e:
+                        print(f"  Error deleting {f}: {e}")
 
     def run(self):
         """Main training pipeline."""
         print("Loading features from DuckDB...")
-        df = self.load_features()
+        full_df = self.load_features()
 
-        # 1. Regression Targets
+        stations = full_df['station_id'].unique()
+        print(f"Found {len(stations)} stations: {stations}")
+
         regression_targets = {
             'temp_max': ['temp_max'],
             'temp_min': ['temp_min'],
@@ -253,52 +260,59 @@ class WeatherModelTrainer:
 
         all_results = {}
 
-        for target_name, target_cols in regression_targets.items():
+        for station_id in stations:
+            print(f"\n{'#'*60}")
+            print(f"### TRAINING FOR STATION: {station_id}")
+            print(f"{'#'*60}")
+
+            df = full_df[full_df['station_id'] == station_id].copy()
+
+            for target_name, target_cols in regression_targets.items():
+                print(f"\n{'='*60}")
+                print(f"Training REGRESSORS for: {target_name} ({station_id})")
+                print(f"{'='*60}")
+
+                X, y = self.prepare_data(df, target_cols)
+                if y.shape[1] == 0:
+                    print(f"Skipping {target_name} (column not found)")
+                    continue
+
+                models, results = self.train_regressors(X, y[target_cols[0]], target_name, station_id)
+                all_results[f"{station_id}_{target_name}"] = results
+                self.save_models(models, target_name, station_id)
+
+                print(f"\n{target_name} Results ({station_id}):")
+                for model_name, metrics in results.items():
+                    print(f"  {model_name}: RMSE={metrics['rmse']:.4f}, R2={metrics['r2']:.4f}")
+
+            # 2. Classification Target (Rain Probability)
             print(f"\n{'='*60}")
-            print(f"Training REGRESSORS for: {target_name}")
+            print(f"Training CLASSIFIERS for: rain_probability ({station_id})")
             print(f"{'='*60}")
 
-            X, y = self.prepare_data(df, target_cols)
-            # Check if columns exist (humidity might be missing if dbt didn't run yet)
-            if y.shape[1] == 0:
-                print(f"Skipping {target_name} (column not found)")
-                continue
+            df['is_raining'] = (df['precipitation_mm'] > 0.1).astype(int)
+            X, y = self.prepare_data(df, ['is_raining'])
+            models, results = self.train_classifiers(X, y['is_raining'], 'rain_probability', station_id)
 
-            models, results = self.train_regressors(X, y[target_cols[0]], target_name)
-            all_results[target_name] = results
-            self.save_models(models, target_name)
+            all_results[f"{station_id}_rain_probability"] = results
+            self.save_models(models, 'rain_probability', station_id)
 
-            # Print results
-            print(f"\n{target_name} Results:")
+            print(f"\nrain_probability Results ({station_id}):")
             for model_name, metrics in results.items():
-                print(f"  {model_name}: RMSE={metrics['rmse']:.4f}, R2={metrics['r2']:.4f}")
-
-        # 2. Classification Target (Rain Probability)
-        print(f"\n{'='*60}")
-        print(f"Training CLASSIFIERS for: rain_probability")
-        print(f"{'='*60}")
-
-        # Create binary target: 1 if rain > 0.1mm, else 0
-        df['is_raining'] = (df['precipitation_mm'] > 0.1).astype(int)
-
-        X, y = self.prepare_data(df, ['is_raining'])
-        models, results = self.train_classifiers(X, y['is_raining'], 'rain_probability')
-
-        all_results['rain_probability'] = results
-        self.save_models(models, 'rain_probability')
-
-        print(f"\nrain_probability Results:")
-        for model_name, metrics in results.items():
-            print(f"  {model_name}: Accuracy={metrics['accuracy']:.4f}, AUC={metrics['roc_auc']:.4f}")
+                print(f"  {model_name}: Accuracy={metrics['accuracy']:.4f}, AUC={metrics['roc_auc']:.4f}")
 
         # Cleanup old models
         self.cleanup_old_models(keep_n=3)
 
         print(f"\n{'='*60}")
-        print("Training completed!")
+        print("Training completed for all stations!")
         print(f"{'='*60}")
 
         return all_results
+
+if __name__ == "__main__":
+    trainer = WeatherModelTrainer()
+    results = trainer.run()
 
 if __name__ == "__main__":
     trainer = WeatherModelTrainer()

@@ -5,7 +5,7 @@ import joblib
 import os
 from glob import glob
 from datetime import datetime, timedelta
-from src.monitor import WeatherMonitor
+from monitor import WeatherMonitor
 
 class WeatherPredictor:
     def __init__(self, db_path="data/weather.db", models_dir="models"):
@@ -14,9 +14,9 @@ class WeatherPredictor:
         self.models = {}
         self.monitor = WeatherMonitor(db_path)
 
-    def load_latest_models(self):
-        """Load the most recent model for each target."""
-        model_files = glob(os.path.join(self.models_dir, "*.pkl"))
+    def load_latest_models(self, station_id):
+        """Load the most recent model for each target for a specific station."""
+        model_files = glob(os.path.join(self.models_dir, f"*_{station_id}_*.pkl"))
 
         # Group by target and model_type
         models_dict = {}
@@ -24,19 +24,13 @@ class WeatherPredictor:
             basename = os.path.basename(model_file)
             parts = basename.replace('.pkl', '').split('_')
 
-            # Parse filename: modeltype_target_timestamp.pkl
-            # Classification models might have different naming pattern if not careful,
-            # but based on train.py they follow {model_name}_{target_name}_{timestamp}.pkl
-            # model_name is 'xgboost' or 'random_forest'
+            # Parse filename: modeltype_target_stationid_timestamp.pkl
+            # Parts could be like ['xgboost', 'temp', 'max', '01078', '20260119', '003622']
+            # Target is usually parts[1:-3] if model_type is parts[0]
 
-            model_type = parts[0]  # xgboost or random
-            if model_type == "random":
-                model_type = "_".join(parts[:2])  # random_forest
-                target = "_".join(parts[2:-2])
-                timestamp = "_".join(parts[-2:])
-            else:
-                target = "_".join(parts[1:-2])
-                timestamp = "_".join(parts[-2:])
+            model_type = parts[0]
+            target = "_".join(parts[1:-3])
+            timestamp = "_".join(parts[-2:])
 
             key = f"{model_type}_{target}"
 
@@ -55,48 +49,33 @@ class WeatherPredictor:
                 'target': info['target'],
                 'model_type': info['model_type']
             }
-            print(f"Loaded {key} from {info['path']}")
+            print(f"Loaded {key} for station {station_id} from {info['path']}")
 
-    def get_features_for_date(self, target_date=None):
+    def get_features_for_date(self, station_id, target_date=None):
         """
-        Get features to predict FOR target_date.
-        This means fetching the row from target_date - 1 day.
-        If target_date is None, fetch the absolute latest row.
+        Get features for a specific station to predict FOR target_date.
         """
         conn = duckdb.connect(self.db_path)
 
         if target_date:
-            # We need data from the day BEFORE the target start date
             ref_date = pd.to_datetime(target_date) - timedelta(days=1)
             ref_date_str = ref_date.strftime('%Y-%m-%d')
-            query = f"SELECT * FROM weather_features WHERE measurement_date = '{ref_date_str}'"
-            print(f"Fetching features for reference date: {ref_date_str} (to predict starting {target_date})")
+            query = f"SELECT * FROM weather_features WHERE station_id = '{station_id}' AND measurement_date = '{ref_date_str}'"
+            print(f"Fetching features for station {station_id}, reference date: {ref_date_str}")
         else:
-            query = """
+            query = f"""
                 SELECT * FROM weather_features
-                WHERE measurement_date IS NOT NULL
+                WHERE station_id = '{station_id}' AND measurement_date IS NOT NULL
                 ORDER BY measurement_date DESC
                 LIMIT 1
             """
-            print("Fetching latest available features...")
+            print(f"Fetching latest available features for station {station_id}...")
 
         df = conn.execute(query).df()
         conn.close()
 
         if df.empty:
-            raise ValueError(f"No data found for reference date. Cannot predict for {target_date}.")
-
-        # Check for data freshness
-        ref_date = pd.to_datetime(df['measurement_date'].iloc[0])
-        today = pd.to_datetime(datetime.now().date())
-        days_lag = (today - ref_date).days
-
-        if days_lag > 30 and not target_date:
-            print(f"\n========================================================")
-            print(f"⚠️  WARNING: Using historical data from {ref_date.strftime('%Y-%m-%d')}!")
-            print(f"   The database does not contain recent weather data.")
-            print(f"   Forecast will be for the period starting: {(ref_date + timedelta(days=1)).strftime('%Y-%m-%d')}")
-            print(f"========================================================\n")
+            raise ValueError(f"No data found for station {station_id} on reference date.")
 
         return df
 
@@ -106,7 +85,7 @@ class WeatherPredictor:
         base_date = pd.to_datetime(latest_row['measurement_date'].iloc[0])
         future_date = base_date + timedelta(days=day_offset + 1)
 
-        # Create feature vector
+        # Create feature vector (excluding station_id from features)
         features = {
             'day_of_year': future_date.dayofyear,
             'day_sin': np.sin(2 * np.pi * future_date.dayofyear / 365.0),
@@ -141,23 +120,23 @@ class WeatherPredictor:
             'ozone_mean': latest_row['ozone_mean'].iloc[0] if 'ozone_mean' in latest_row else 0,
             'uv_index_max': latest_row['uv_index_max'].iloc[0] if 'uv_index_max' in latest_row else 0,
             'visibility_mean': latest_row['visibility_mean'].iloc[0] if 'visibility_mean' in latest_row else 0,
-            'cloud_cover_mean': latest_row['cloud_cover_mean'].iloc[0],
-            'sunshine_hours': latest_row['sunshine_hours'].iloc[0]
+            'cloud_cover_mean': latest_row['cloud_cover_mean'].iloc[0] if 'cloud_cover_mean' in latest_row else 0,
+            'sunshine_hours': latest_row['sunshine_hours'].iloc[0] if 'sunshine_hours' in latest_row else 0
         }
 
         return pd.DataFrame([features])
 
-    def predict_7_days(self, model_type='xgboost', start_date=None):
+    def predict_7_days(self, station_id, model_type='xgboost', start_date=None):
         """Generate 7-day forecast for all weather variables."""
         try:
-            latest_row = self.get_features_for_date(start_date)
+            latest_row = self.get_features_for_date(station_id, start_date)
         except ValueError as e:
-            print(f"Error: {e}")
+            print(f"Error for station {station_id}: {e}")
             return pd.DataFrame()
 
         base_date = pd.to_datetime(latest_row['measurement_date'].iloc[0])
 
-        print(f"\nGenerating 7-day forecast using {model_type} models...")
+        print(f"\nGenerating 7-day forecast for station {station_id} using {model_type} models...")
         # The base_date is the reference date (T-1). The first prediction is for base_date + 1 day.
         print(f"Reference data date: {base_date.strftime('%Y-%m-%d')}")
         print(f"First prediction date: {(base_date + timedelta(days=1)).strftime('%Y-%m-%d')}\n")
@@ -168,7 +147,7 @@ class WeatherPredictor:
             forecast_date = base_date + timedelta(days=day + 1)
             features = self.prepare_forecast_input(latest_row, day)
 
-            predictions = {'date': forecast_date.strftime('%Y-%m-%d')}
+            predictions = {'date': forecast_date.strftime('%Y-%m-%d'), 'station_id': station_id}
 
             # Predict each target
             targets = [
@@ -182,12 +161,10 @@ class WeatherPredictor:
                 if model_key in self.models:
                     model = self.models[model_key]['model']
                     if target == 'rain_probability':
-                        # For probability tasks, use predict_proba
-                        # Check if model has predict_proba
                         if hasattr(model, 'predict_proba'):
-                            pred = model.predict_proba(features)[0][1] # Probability of class 1 (Rain)
+                            pred = model.predict_proba(features)[0][1]
                         else:
-                            pred = model.predict(features)[0] # Fallback if regressor used by mistake
+                            pred = model.predict(features)[0]
                     else:
                         pred = model.predict(features)[0]
                     predictions[target] = pred
@@ -198,50 +175,55 @@ class WeatherPredictor:
 
         return pd.DataFrame(forecasts)
 
-    def run(self, start_date=None):
+    def run(self, station_id="01078", start_date=None):
         """Main prediction pipeline."""
-        print("Loading trained models...")
-        self.load_latest_models()
+        print(f"Loading trained models for station {station_id}...")
+        self.load_latest_models(station_id)
 
-        print(f"\nAvailable models: {list(self.models.keys())}")
+        if not self.models:
+            print(f"No models found for station {station_id}. Please train models first.")
+            return
+
+        print(f"\nAvailable target models: {list(set([k.replace('xgboost_', '').replace('random_forest_', '') for k in self.models.keys()]))}")
 
         # Generate forecasts for both model types
-        xgb_forecast = self.predict_7_days('xgboost', start_date)
-        rf_forecast = self.predict_7_days('random_forest', start_date)
+        xgb_forecast = self.predict_7_days(station_id, 'xgboost', start_date)
+        rf_forecast = self.predict_7_days(station_id, 'random_forest', start_date)
 
         if xgb_forecast.empty or rf_forecast.empty:
-            print("Prediction failed due to missing data.")
+            print("Prediction failed due to missing data or models.")
             return
 
         print("\n" + "="*100)
-        print("7-DAY WEATHER FORECAST - XGBoost")
+        print(f"7-DAY WEATHER FORECAST FOR STATION {station_id} - XGBoost")
         print("="*100)
         print(xgb_forecast.to_string(index=False))
 
         print("\n" + "="*100)
-        print("7-DAY WEATHER FORECAST - Random Forest")
+        print(f"7-DAY WEATHER FORECAST FOR STATION {station_id} - Random Forest")
         print("="*100)
         print(rf_forecast.to_string(index=False))
 
         # Save forecasts
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         date_suffix = f"_{start_date}" if start_date else ""
-        xgb_forecast.to_csv(f"forecasts_xgboost{date_suffix}_{timestamp}.csv", index=False)
-        rf_forecast.to_csv(f"forecasts_rf{date_suffix}_{timestamp}.csv", index=False)
+        xgb_forecast.to_csv(f"forecasts_{station_id}_xgboost{date_suffix}_{timestamp}.csv", index=False)
+        rf_forecast.to_csv(f"forecasts_{station_id}_rf{date_suffix}_{timestamp}.csv", index=False)
 
         # Log to MLOps Monitor
         self.monitor.save_forecast(xgb_forecast, 'xgboost')
         self.monitor.save_forecast(rf_forecast, 'random_forest')
 
         print(f"\nForecasts saved to:")
-        print(f"  - forecasts_xgboost{date_suffix}_{timestamp}.csv")
-        print(f"  - forecasts_rf{date_suffix}_{timestamp}.csv")
+        print(f"  - forecasts_{station_id}_xgboost{date_suffix}_{timestamp}.csv")
+        print(f"  - forecasts_{station_id}_rf{date_suffix}_{timestamp}.csv")
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Generate 7-day weather forecast.')
+    parser.add_argument('--station', type=str, default="01078", help='Station ID (e.g., 01078 for Dusseldorf).')
     parser.add_argument('--date', type=str, help='Start date for prediction (YYYY-MM-DD). Defaults to tomorrow relative to latest data.')
     args = parser.parse_args()
 
     predictor = WeatherPredictor()
-    predictor.run(start_date=args.date)
+    predictor.run(station_id=args.station, start_date=args.date)
